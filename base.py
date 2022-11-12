@@ -1,5 +1,6 @@
 import typing as t
 from threading import Thread, Event
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 
 class BrokerMessage(object):
@@ -59,3 +60,32 @@ class BrokerClient(Thread):
         while not self.quit_event.is_set():
             msg = self.channel.listen()
             self.executor.submit(self.on_message, msg)
+
+class Message(object):
+    def __init__(self, channel: AbstractChannel, to: t.Optional[str]=None):
+        self.address = to
+        self.channel = channel
+    
+    def _get(self, command: str, *args: t.List[t.Any]) -> None:
+        method_name = command.replace('_', '-')
+        self.channel.say(BrokerMessage((method_name, *args), self.address))
+    
+    def __getattribute__(self, command: str) -> t.Any:
+        if command in ('address', '_get', 'channel'):
+            return object.__getattribute__(self, command)
+        return partial(self._get, command)
+
+class BrokerableClass(BrokerClient):
+    def say_to(self, address: t.Optional[str]=None) -> Message:
+        return Message(self.channel, address)
+        
+    def run(self) -> None:
+        while not self.quit_event.is_set():
+            msg = self.channel.listen()
+            command, *arguments = msg.data
+            method_name = command.replace('-', '_')
+            if hasattr(self, method_name):
+                self.executor.submit(getattr(self, method_name), msg.sender, *arguments)
+            else:
+                print('Method {} not found'.format(method_name))
+        
