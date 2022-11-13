@@ -1,13 +1,15 @@
 import typing as t
+import uuid
 from threading import Thread, Event
 from functools import partial
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
 
 class BrokerMessage(object):
-    def __init__(self, data: t.Any, address: t.Optional[str]=None, sender: t.Optional[str]=None):
+    def __init__(self, data: t.Any, address: t.Optional[str]=None, sender: t.Optional[str]=None, is_query: bool=False):
         self.sender = sender # type: t.Optional[str]
         self.address = address # type: t.Optional[str]
         self.data = data # type: t.Any
+        self.uuid = str(uuid.uuid4()) if is_query else None
 
 class AbstractChannel(object):
     def __init__(self) -> None:
@@ -22,9 +24,8 @@ class AbstractChannel(object):
     def receive_noblock(self) -> t.Optional[BrokerMessage]:
         raise NotImplementedError
 
-    def query(self, data: BrokerMessage) -> BrokerMessage:
-        self.say(data)
-        return self.listen()
+    def query(self, data: BrokerMessage) -> Future[BrokerMessage]:
+        raise NotImplementedError
 
 class AbstractBroker(object):
     def __init__(self) -> None:
@@ -35,6 +36,7 @@ class AbstractBroker(object):
 
 class BrokerClient(Thread):
     def __init__(self, broker: AbstractBroker, name: t.Optional[str]=None):
+        self.queries = {} # type: t.Dict[str, Future[BrokerMessage]]
         self.channel = broker.connect(name) # type: AbstractChannel
         self.executor = ThreadPoolExecutor() # type: ThreadPoolExecutor
         self.quit_event = Event()
@@ -51,6 +53,19 @@ class BrokerClient(Thread):
     
     def broadcast(self, data: t.Any) -> None:
         self.channel.say(BrokerMessage(data))
+
+    def query(self, data: t.Any, address: t.Optional[str]) -> Future[BrokerMessage]:
+        msg = BrokerMessage(data, address, is_query=True)
+        if msg.uuid is None:
+            raise ValueError('Message does not contain id')
+        self.queries[msg.uuid] = Future()
+        self.channel.say(msg)
+        return self.queries[msg.uuid]
+
+    def respond(self, data: t.Any, msg: BrokerMessage) -> None:
+        reply = BrokerMessage(data, msg.sender)
+        reply.uuid = msg.uuid
+        self.channel.say(reply)
     
     def stop(self) -> None:
         self.quit_event.set()
@@ -59,6 +74,8 @@ class BrokerClient(Thread):
         self.initialize()
         while not self.quit_event.is_set():
             msg = self.channel.listen()
+            if isinstance(msg, BrokerMessage) and (msg.uuid is not None) and (msg.uuid in self.queries):
+                self.queries[msg.uuid].set_result(msg)
             self.executor.submit(self.on_message, msg)
 
 class Message(object):
